@@ -13,6 +13,7 @@ import {
 import { traceInfluencePaths, validateMaxHops, validateTraceSelection } from './trace.js';
 import { computeEvidenceShapley, validateShapleySelection } from './shapley.js';
 import { analyzeMandatoryLinks, validateBottleneckSelection } from './bottleneck.js';
+import { planConclusionReversal, validateReversalSelection } from './reversal.js';
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(currentDir, '../..');
@@ -132,6 +133,34 @@ app.post('/api/bottleneck/mandatory-links', (request, response) => {
     response.json({ analysis });
   } catch (error) {
     response.status(400).json({ error: error instanceof Error ? error.message : '必经链路分析请求无效。' });
+  }
+});
+
+// 结论翻转方案：使用请求体携带的当前画布图，在内存中穷举 11^n 个权重组合，绝不保存或修改持久化图。
+app.post('/api/reversal/conclusion-flip', (request, response) => {
+  try {
+    const candidate = request.body?.graph;
+    if (candidate === undefined || candidate === null) {
+      throw new Error('请求体必须携带当前图 graph（翻转方案不会保存该图）。');
+    }
+    const graph = validateGraphDocument(candidate);
+    const selection = validateReversalSelection(
+      graph,
+      request.body?.claimNodeId,
+      request.body?.desiredSide,
+      request.body?.edgeIds
+    );
+    const options = validateOptions(request.body?.options);
+    const plan = planConclusionReversal(
+      graph,
+      selection.claimId,
+      selection.side,
+      selection.edges.map((edge) => edge.id),
+      options
+    );
+    response.json({ plan });
+  } catch (error) {
+    response.status(400).json({ error: error instanceof Error ? error.message : '结论翻转方案请求无效。' });
   }
 });
 

@@ -293,3 +293,81 @@ export interface BottleneckRequest {
   /** 目标观点节点 id（kind 必须为 claim） */
   targetNodeId: string;
 }
+
+/** 结论翻转的期望侧：最终可信度 ≥ 0.5（支持侧）或 < 0.5（反对侧） */
+export type ReversalDesiredSide = 'above' | 'below';
+
+/** 结论翻转方案中一条可调连线的原值 / 建议值对照 */
+export interface ReversalEdgeAdjustment {
+  /** 可调连线 id */
+  edgeId: string;
+  /** 连线起点 id */
+  sourceId: string;
+  /** 连线终点 id */
+  targetId: string;
+  /** 连线关系（支持 / 反驳） */
+  stance: Stance;
+  /** 当前画布上的原权重 */
+  currentWeight: number;
+  /** 方案建议权重（取值 0、0.1、…、1.0）；零改动方案时等于原权重 */
+  suggestedWeight: number;
+  /** 建议值是否与原值不同（|建议 − 原| > 1e-9） */
+  changed: boolean;
+}
+
+export interface ReversalPlanRequest {
+  /** 画布当前图：仅在内存中用于穷举，不会被保存或持久化 */
+  graph: GraphDocument;
+  /** 目标观点节点 id（kind 必须为 claim） */
+  claimNodeId: string;
+  /** 期望侧：above 要求最终可信度 ≥ 0.5，below 要求 < 0.5 */
+  desiredSide: ReversalDesiredSide;
+  /** 1–4 条允许调整权重的连线 id（不得重复） */
+  edgeIds: string[];
+  options?: PropagateOptions;
+}
+
+export interface ReversalPlanResult {
+  /** 目标观点节点 id */
+  claimNodeId: string;
+  /** 期望侧 */
+  desiredSide: ReversalDesiredSide;
+  /** 参与穷举的可调连线 id（按 id 升序，与 weightVector 对齐） */
+  edgeIds: string[];
+  /** 判定阈值，固定 0.5 */
+  threshold: number;
+  /** 当前图（全部连线保持原权重）在当前传播参数下的目标终值；不收敛时为 null */
+  currentTargetValue: number | null;
+  /** 当前图传播状态：收敛 / 振荡 / 达到上限 */
+  currentStatus: SensitivityPointStatus;
+  /**
+   * 当前图是否已满足期望（收敛且目标终值落在期望侧）。
+   * 为 true 时直接返回零改动方案，不穷举组合。
+   */
+  alreadySatisfied: boolean;
+  /** 是否找到了满足期望的收敛方案（含零改动方案） */
+  feasible: boolean;
+  /** 方案建议：按连线 id 升序给出原值 / 建议值对照；无可行解时为 null */
+  adjustments: ReversalEdgeAdjustment[] | null;
+  /** 方案应用后目标观点的最终可信度；无可行解时为 null */
+  targetFinalValue: number | null;
+  /** 方案相对当前权重的 L1 改变量之和；无可行解时为 null */
+  l1Change: number | null;
+  /** 方案中实际改动的连线数量；无可行解时为 null */
+  changedEdgeCount: number | null;
+  /** 按连线 id 排序后的建议权重向量（逐项对齐 edgeIds）；无可行解时为 null */
+  weightVector: number[] | null;
+  /** 穷举的候选权重组合总数（11^n）；零改动直返时为 0（未穷举） */
+  candidateCount: number;
+  /** 实际评估的传播次数：零改动直返为 1（仅评估当前图），否则为全部组合数 11^n */
+  evaluatedCount: number;
+  /** 评估中出现持续振荡的组合数（零改动直返时为 0） */
+  oscillatingCount: number;
+  /** 评估中达到迭代上限仍未收敛的组合数（零改动直返时为 0） */
+  limitCount: number;
+  /** 已收敛但目标终值不满足期望侧的组合数（零改动直返时为 0） */
+  infeasibleCount: number;
+  /** 本次穷举实际使用的传播参数 */
+  options: Required<PropagateOptions>;
+  message: string;
+}

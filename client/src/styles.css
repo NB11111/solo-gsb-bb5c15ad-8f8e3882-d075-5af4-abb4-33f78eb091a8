@@ -1363,6 +1363,130 @@ fieldset.inspector:disabled {
   filter: drop-shadow(0 0 6px rgb(217 119 6 / 50%));
 }
 
+/* ---------- 结论翻转方案 ---------- */
+
+.reversal-card {
+  border-color: #fca5a5;
+}
+
+.reversal-edge-list {
+  display: grid;
+  gap: 6px;
+  max-height: 168px;
+  padding: 8px 10px;
+  overflow-y: auto;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.reversal-edge-item {
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.reversal-result {
+  margin-top: 10px;
+}
+
+.reversal-zero {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid #bbf7d0;
+  border-radius: 10px;
+  color: #166534;
+  background: #f0fdf4;
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.reversal-zero p {
+  margin: 0;
+}
+
+.reversal-list-title {
+  margin: 12px 0 6px;
+  color: #475569;
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+.reversal-adjustment-list {
+  display: grid;
+  gap: 6px;
+  margin: 0 0 10px;
+  padding: 0;
+  list-style: none;
+}
+
+.reversal-adjustment-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 9px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.reversal-adjustment-list li.changed {
+  border: 1px solid #fecaca;
+  background: #fef2f2;
+}
+
+.reversal-adjustment-list li.unchanged {
+  border: 1px dashed #e2e8f0;
+  background: #f8fafc;
+  color: #94a3b8;
+}
+
+.reversal-adjustment-edge {
+  min-width: 0;
+  word-break: break-word;
+}
+
+.reversal-adjustment-values {
+  display: inline-flex;
+  flex: none;
+  align-items: baseline;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.reversal-old {
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.reversal-arrow {
+  color: #64748b;
+  font-size: 11px;
+}
+
+.reversal-new {
+  color: #b91c1c;
+  font-size: 13px;
+}
+
+.reversal-noop {
+  color: #94a3b8;
+  font-size: 10.5px;
+}
+
+.reversal-apply {
+  width: 100%;
+  margin: 2px 0 4px;
+}
+
+.reversal-counts {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed #e2e8f0;
+}
+
 @media (max-width: 980px) {
   .topbar {
     align-items: flex-start;

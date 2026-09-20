@@ -7,6 +7,9 @@ import { createGraphStore } from './db.js';
 import { propagateBeliefs, validateGraphDocument, validateOptions } from './propagation.js';
 import { scanEdgeWeightSensitivity, validateSamples, validateSensitivitySelection } from './sensitivity.js';
 import { traceInfluencePaths, validateMaxHops, validateTraceSelection } from './trace.js';
+import { computeEvidenceShapley, validateShapleySelection } from './shapley.js';
+import { analyzeMandatoryLinks, validateBottleneckSelection } from './bottleneck.js';
+import { planConclusionReversal, validateReversalSelection } from './reversal.js';
 const currentDir = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(currentDir, '../..');
 const port = Number(process.env.PORT ?? 8080);
@@ -77,6 +80,56 @@ app.post('/api/trace/influence-paths', (request, response) => {
     }
     catch (error) {
         response.status(400).json({ error: error instanceof Error ? error.message : '影响路径追踪请求无效。' });
+    }
+});
+// 证据贡献分摊：使用请求体携带的当前画布图，在内存中对全部 2^n 个证据联盟重算传播并做精确 Shapley 分摊，绝不保存或修改持久化图。
+app.post('/api/shapley/evidence-contribution', (request, response) => {
+    try {
+        const candidate = request.body?.graph;
+        if (candidate === undefined || candidate === null) {
+            throw new Error('请求体必须携带当前图 graph（分摊不会保存该图）。');
+        }
+        const graph = validateGraphDocument(candidate);
+        validateShapleySelection(graph, request.body?.claimNodeId, request.body?.evidenceNodeIds);
+        const options = validateOptions(request.body?.options);
+        const shapley = computeEvidenceShapley(graph, request.body.claimNodeId, request.body.evidenceNodeIds, options);
+        response.json({ shapley });
+    }
+    catch (error) {
+        response.status(400).json({ error: error instanceof Error ? error.message : '证据贡献分摊请求无效。' });
+    }
+});
+// 必经链路分析：使用请求体携带的当前画布图，在内存中按「删除后不可达」精确计算瓶颈（天然处理环），绝不保存或修改持久化图。
+app.post('/api/bottleneck/mandatory-links', (request, response) => {
+    try {
+        const candidate = request.body?.graph;
+        if (candidate === undefined || candidate === null) {
+            throw new Error('请求体必须携带当前图 graph（分析不会保存该图）。');
+        }
+        const graph = validateGraphDocument(candidate);
+        validateBottleneckSelection(graph, request.body?.targetNodeId);
+        const analysis = analyzeMandatoryLinks(graph, request.body.targetNodeId);
+        response.json({ analysis });
+    }
+    catch (error) {
+        response.status(400).json({ error: error instanceof Error ? error.message : '必经链路分析请求无效。' });
+    }
+});
+// 结论翻转方案：使用请求体携带的当前画布图，在内存中穷举 11^n 个权重组合，绝不保存或修改持久化图。
+app.post('/api/reversal/conclusion-flip', (request, response) => {
+    try {
+        const candidate = request.body?.graph;
+        if (candidate === undefined || candidate === null) {
+            throw new Error('请求体必须携带当前图 graph（翻转方案不会保存该图）。');
+        }
+        const graph = validateGraphDocument(candidate);
+        const selection = validateReversalSelection(graph, request.body?.claimNodeId, request.body?.desiredSide, request.body?.edgeIds);
+        const options = validateOptions(request.body?.options);
+        const plan = planConclusionReversal(graph, selection.claimId, selection.side, selection.edges.map((edge) => edge.id), options);
+        response.json({ plan });
+    }
+    catch (error) {
+        response.status(400).json({ error: error instanceof Error ? error.message : '结论翻转方案请求无效。' });
     }
 });
 if (existsSync(staticDirectory)) {

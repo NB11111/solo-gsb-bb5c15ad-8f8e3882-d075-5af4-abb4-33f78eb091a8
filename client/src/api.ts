@@ -3,6 +3,7 @@ import type {
   GraphDocument,
   PropagateOptions,
   PropagateResult,
+  ReversalPlanResult,
   SensitivityResult,
   ShapleyResult,
   TraceResult
@@ -66,6 +67,18 @@ export const api = {
   /** 必经链路分析：提交当前画布图，按「删除后不可达」精确计算瓶颈及其覆盖证据，仅在服务端内存中计算，不会保存图。 */
   bottleneckAnalysis: (payload: { graph: GraphDocument; targetNodeId: string }) =>
     request<{ analysis: BottleneckResult }>('/api/bottleneck/mandatory-links', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    }),
+  /** 结论翻转方案：提交当前画布图，在 0/0.1/…/1.0 网格上穷举 11^n 个权重组合求全局最优，仅在服务端内存中计算，不会保存图。 */
+  conclusionFlip: (payload: {
+    graph: GraphDocument;
+    claimNodeId: string;
+    desiredSide: 'above' | 'below';
+    edgeIds: string[];
+    options: PropagateOptions;
+  }) =>
+    request<{ plan: ReversalPlanResult }>('/api/reversal/conclusion-flip', {
       method: 'POST',
       body: JSON.stringify(payload)
     })

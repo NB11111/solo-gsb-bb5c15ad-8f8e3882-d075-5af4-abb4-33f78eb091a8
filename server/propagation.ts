@@ -307,24 +307,130 @@ function findNegativeCycles(
   return cycles;
 }
 
-export function propagateBeliefs(graph: GraphDocument, suppliedOptions?: PropagateOptions): PropagateResult {
-  const options = validateOptions(suppliedOptions);
-  const ids = graph.nodes.map((node) => node.id);
-  const indexById = new Map(ids.map((id, index) => [id, index]));
-  const priors = graph.nodes.map((node) => node.initialBelief);
-  const anchored = graph.nodes.map((node) => node.anchored);
-  const incoming = ids.map(() => [] as RuntimeEdge[]);
-  graph.edges.forEach((edge) => {
-    const targetIndex = indexById.get(edge.target);
-    if (targetIndex !== undefined) {
-      incoming[targetIndex].push({
-        ...edge,
-        signedWeight: edge.stance === 'support' ? edge.weight : -edge.weight
-      });
-    }
-  });
+/** 编译后的传播图：穷举型分析（结论翻转）复用同一份结构，仅在槽位上改边权，避免反复建表。 */
+export interface CompiledPropagation {
+  nodeIds: string[];
+  priors: Float64Array;
+  anchored: Uint8Array;
+  /** 每条入边记录 [源下标, 是否支持边(1/0), 权重槽位下标]，按目标节点连续存放。 */
+  incoming: { sourceIndex: number; isSupport: number; slot: number }[][];
+  /** 可变边权槽位（与编译时给出的边序对齐）；穷举时直接覆写槽位即可。 */
+  edgeWeights: Float64Array;
+  options: Required<PropagateOptions>;
+}
 
-  let beliefs = [...priors];
+/** 不带轨迹 / 环分析的紧凑传播结果：供需要跑成千上万次的穷举型分析使用。 */
+export interface CompactPropagationResult {
+  converged: boolean;
+  oscillating: boolean;
+  iterations: number;
+  finalBeliefs: Float64Array;
+  maxChange: number;
+  detectedPeriod: number | null;
+}
+
+/**
+ * 把图编译为可反复运行的传播结构。
+ * slotOf 为每条图连线给出权重槽位下标（缺省按 edges 顺序一一对应），
+ * 供结论翻转之类“只改少数边权”的穷举复用。
+ */
+export function compilePropagation(
+  graph: GraphDocument,
+  suppliedOptions?: PropagateOptions,
+  slotOf?: Map<string, number>
+): CompiledPropagation {
+  const options = validateOptions(suppliedOptions);
+  const nodeIds = graph.nodes.map((node) => node.id);
+  const indexById = new Map(nodeIds.map((id, index) => [id, index]));
+  const priors = Float64Array.from(graph.nodes, (node) => node.initialBelief);
+  const anchored = Uint8Array.from(graph.nodes, (node) => (node.anchored ? 1 : 0));
+  const incoming = nodeIds.map(() => []) as CompiledPropagation['incoming'];
+  const edgeWeights = new Float64Array(graph.edges.length);
+  graph.edges.forEach((edge, edgeIndex) => {
+    const slot = slotOf?.get(edge.id) ?? edgeIndex;
+    edgeWeights[slot] = edge.weight;
+    incoming[indexById.get(edge.target)!].push({
+      sourceIndex: indexById.get(edge.source)!,
+      isSupport: edge.stance === 'support' ? 1 : 0,
+      slot
+    });
+  });
+  return { nodeIds, priors, anchored, incoming, edgeWeights, options };
+}
+
+/**
+ * 在编译后的传播图上跑一次紧凑传播：更新公式、收敛判定、振荡检测与 propagateBeliefs 完全一致，
+ * 但不保留逐轮轨迹、不枚举负反馈环，供穷举型分析（结论翻转）复用。
+ */
+export function runCompiledPropagation(compiled: CompiledPropagation): CompactPropagationResult {
+  const { nodeIds, priors, anchored, incoming, edgeWeights, options } = compiled;
+  const count = nodeIds.length;
+  let beliefs = priors.slice();
+  const history: number[][] = [[...beliefs]];
+  let maxChange = 1;
+  let converged = false;
+  let detectedPeriod: number | null = null;
+  let iterations = 0;
+
+  for (iterations = 1; iterations <= options.maxIterations; iterations += 1) {
+    const next = new Float64Array(count);
+    for (let index = 0; index < count; index += 1) {
+      if (anchored[index]) {
+        next[index] = priors[index];
+        continue;
+      }
+      // 两遍累加（先支持、后反驳），与 propagateBeliefs 的运算顺序逐位一致。
+      let supportInfluence = 0;
+      let rebutInfluence = 0;
+      const edges = incoming[index];
+      for (let edgeIndex = 0; edgeIndex < edges.length; edgeIndex += 1) {
+        const edge = edges[edgeIndex];
+        if (edge.isSupport) supportInfluence += edgeWeights[edge.slot] * beliefs[edge.sourceIndex];
+      }
+      for (let edgeIndex = 0; edgeIndex < edges.length; edgeIndex += 1) {
+        const edge = edges[edgeIndex];
+        if (!edge.isSupport) rebutInfluence += edgeWeights[edge.slot] * beliefs[edge.sourceIndex];
+      }
+      const raw = priors[index] + options.lambda * (supportInfluence - rebutInfluence);
+      next[index] = Math.min(1, Math.max(0, raw));
+    }
+
+    maxChange = 0;
+    for (let index = 0; index < count; index += 1) {
+      const change = Math.abs(next[index] - beliefs[index]);
+      if (change > maxChange) maxChange = change;
+    }
+    beliefs = next;
+    history.push([...beliefs]);
+
+    if (maxChange < options.threshold) {
+      converged = true;
+      break;
+    }
+
+    detectedPeriod = detectPeriod(history, Math.max(options.threshold * 2.5, 0.002));
+    if (detectedPeriod !== null && iterations >= 8) break;
+  }
+
+  const hitLimit = iterations >= options.maxIterations && !converged;
+  const oscillating = detectedPeriod !== null || (hitLimit && maxChange > options.threshold * 10);
+
+  return { converged, oscillating, iterations, finalBeliefs: beliefs, maxChange, detectedPeriod };
+}
+
+export function propagateBeliefs(graph: GraphDocument, suppliedOptions?: PropagateOptions): PropagateResult {
+  const compiled = compilePropagation(graph, suppliedOptions);
+  const options = compiled.options;
+  const ids = compiled.nodeIds;
+  const indexById = new Map(ids.map((id, index) => [id, index]));
+
+  // 轨迹需要逐轮留档，仍按原方式完整记录（compact runner 不保留历史向量以外的展示信息）。
+  const priors = compiled.priors;
+  const anchored = compiled.anchored;
+  const incoming = compiled.incoming;
+  const edgeWeights = compiled.edgeWeights;
+
+  let beliefs = priors.slice();
   const traces: Record<string, number[]> = Object.fromEntries(ids.map((id) => [id, [beliefs[indexById.get(id)!]]]));
   const history: number[][] = [[...beliefs]];
   let maxChange = 1;
@@ -333,20 +439,27 @@ export function propagateBeliefs(graph: GraphDocument, suppliedOptions?: Propaga
   let iterations = 0;
 
   for (iterations = 1; iterations <= options.maxIterations; iterations += 1) {
-    const next = beliefs.map((current, index) => {
-      if (anchored[index]) return priors[index];
+    const next = new Float64Array(ids.length);
+    for (let index = 0; index < ids.length; index += 1) {
+      if (anchored[index]) {
+        next[index] = priors[index];
+        continue;
+      }
       let supportInfluence = 0;
       let rebutInfluence = 0;
       for (const edge of incoming[index]) {
-        const sourceBelief = beliefs[indexById.get(edge.source)!];
-        if (edge.stance === 'support') supportInfluence += edge.weight * sourceBelief;
-        else rebutInfluence += edge.weight * sourceBelief;
+        if (edge.isSupport) supportInfluence += edgeWeights[edge.slot] * beliefs[edge.sourceIndex];
+        else rebutInfluence += edgeWeights[edge.slot] * beliefs[edge.sourceIndex];
       }
       const raw = priors[index] + options.lambda * (supportInfluence - rebutInfluence);
-      return Math.min(1, Math.max(0, raw));
-    });
+      next[index] = Math.min(1, Math.max(0, raw));
+    }
 
-    maxChange = next.reduce((largest, value, index) => Math.max(largest, Math.abs(value - beliefs[index])), 0);
+    maxChange = 0;
+    for (let index = 0; index < ids.length; index += 1) {
+      const change = Math.abs(next[index] - beliefs[index]);
+      if (change > maxChange) maxChange = change;
+    }
     beliefs = next;
     history.push([...beliefs]);
     ids.forEach((id) => traces[id].push(beliefs[indexById.get(id)!]));
