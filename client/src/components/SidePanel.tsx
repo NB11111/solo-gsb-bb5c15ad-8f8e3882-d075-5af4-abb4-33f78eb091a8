@@ -11,6 +11,8 @@ import type {
   PathSign,
   PropagateOptions,
   PropagateResult,
+  ReversalResult,
+  ReversalSide,
   SensitivityResult,
   ShapleyResult,
   Stance,
@@ -40,6 +42,12 @@ export interface ShapleySelection {
 
 export interface BottleneckSelection {
   targetNodeId: string;
+}
+
+export interface ReversalSelection {
+  claimNodeId: string;
+  desiredSide: ReversalSide;
+  edgeIds: string[];
 }
 
 interface SidePanelProps {
@@ -101,6 +109,17 @@ interface SidePanelProps {
     activeKey: string | null;
     onToggle: (key: string | null) => void;
     onRun: () => void;
+    onClose: () => void;
+  };
+  reversal: {
+    selection: ReversalSelection;
+    /** 目标 / 期望侧 / 可调连线变化都会立即清空已展示的方案结果 */
+    onSelectionChange: (patch: Partial<ReversalSelection>) => void;
+    result: ReversalResult | null;
+    running: boolean;
+    status: string;
+    /** 应用调权清单：一次性更新画布权重并自动保存 */
+    onApply: () => void;
     onClose: () => void;
   };
   nodes: Node<ArgumentNodeData>[];
@@ -239,6 +258,7 @@ export function SidePanel({
   trace,
   shapley,
   bottleneck,
+  reversal,
   nodes,
   edges
 }: SidePanelProps) {
@@ -382,6 +402,15 @@ export function SidePanel({
         edges={edges}
         nodeLabelById={nodeLabelById}
         stanceText={stanceText}
+      />
+
+      <ReversalCard
+        reversal={reversal}
+        nodes={nodes}
+        edges={edges}
+        nodeLabelById={nodeLabelById}
+        stanceText={stanceText}
+        graphEditingDisabled={graphEditingDisabled}
       />
 
       {decomposition && selection.node && <DecompositionCard decomposition={decomposition} />}
@@ -915,6 +944,214 @@ function BottleneckCard({ bottleneck, nodes, edges, nodeLabelById, stanceText }:
                 ))}
               </span>
             </div>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+type ReversalCardProps = Pick<SidePanelProps, 'reversal' | 'nodes' | 'edges'> & {
+  nodeLabelById: Map<string, string>;
+  stanceText: (stance: Stance) => string;
+  graphEditingDisabled?: boolean;
+};
+
+const MAX_REVERSAL_EDGES = 4;
+const REVERSAL_SIDE_OPTIONS: Array<{ value: ReversalSide; label: string }> = [
+  { value: 'atLeastHalf', label: '最终可信度 ≥ 0.5（翻向成立）' },
+  { value: 'belowHalf', label: '最终可信度 < 0.5（翻向不成立）' }
+];
+
+const percent = (value: number) => `${Math.round(value * 100)}%`;
+
+/** 结论翻转方案卡片：选择目标观点、期望侧与 1–4 条可调连线，服务端穷举 11^n 组合后给出调权清单。 */
+function ReversalCard({
+  reversal,
+  nodes,
+  edges,
+  nodeLabelById,
+  stanceText,
+  graphEditingDisabled = false
+}: ReversalCardProps) {
+  const { selection, onSelectionChange, result, running, status, onRun, onApply, onClose } = reversal;
+  const claimNodes = nodes.filter((node) => node.data.kind === 'claim');
+  const claimExists = claimNodes.some((node) => node.id === selection.claimNodeId);
+  const selectedEdges = selection.edgeIds.filter((id) => edges.some((edge) => edge.id === id));
+  const limitReached = selectedEdges.length >= MAX_REVERSAL_EDGES;
+  const canRun = claimExists && selectedEdges.length >= 1 && selectedEdges.length <= MAX_REVERSAL_EDGES;
+
+  const edgeLabel = (edge: Edge) => {
+    const stance = (edge.data?.stance as Stance) ?? 'support';
+    return `${nodeLabelById.get(edge.source) ?? edge.source} ${stanceText(stance)}→ ${
+      nodeLabelById.get(edge.target) ?? edge.target
+    }（${percent(Number(edge.data?.weight ?? 0.6))}）`;
+  };
+
+  const toggleEdge = (edgeId: string, checked: boolean) => {
+    const next = checked ? [...selectedEdges, edgeId] : selectedEdges.filter((id) => id !== edgeId);
+    onSelectionChange({ edgeIds: next });
+  };
+
+  // 调权清单必须仍与当前画布一致（结果在图 / 参数 / 选择变化时已立即清空，这里再做一次防御）。
+  const suggestionsApplyable =
+    Boolean(result?.best) &&
+    result!.best!.suggestions.every((item) => {
+      const edge = edges.find((candidate) => candidate.id === item.edgeId);
+      return edge !== undefined && Number(edge.data?.weight ?? NaN) === item.originalWeight;
+    });
+
+  return (
+    <section className="panel-card reversal-card">
+      <div className="sensitivity-heading">
+        <h2>结论翻转方案</h2>
+        {result && (
+          <button type="button" className="sensitivity-close" onClick={onClose} title="关闭方案结果">
+            ✕
+          </button>
+        )}
+      </div>
+
+      {claimNodes.length === 0 || edges.length === 0 ? (
+        <p className="hint">先创建至少一个观点节点与一条连线，才能搜索让目标结论翻转的调权方案。</p>
+      ) : (
+        <>
+          {graphEditingDisabled && (
+            <p className="hint layout-disabled-hint">正在预览“一键整理布局”：请先<strong>确认应用</strong>或<strong>取消</strong>。</p>
+          )}
+          <fieldset className="inspector" disabled={graphEditingDisabled}>
+          <Field label="目标观点（搜索使其最终可信度落到期望侧的权重）">
+            <select
+              value={claimExists ? selection.claimNodeId : ''}
+              onChange={(event) => onSelectionChange({ claimNodeId: event.target.value })}
+            >
+              {!claimExists && <option value="">请选择观点节点…</option>}
+              {claimNodes.map((node) => (
+                <option key={node.id} value={node.id}>
+                  {node.data.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="期望侧">
+            <select
+              value={selection.desiredSide}
+              onChange={(event) => onSelectionChange({ desiredSide: event.target.value as ReversalSide })}
+            >
+              {REVERSAL_SIDE_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <div className="field">
+            <span>
+              可调连线（{selectedEdges.length}/{MAX_REVERSAL_EDGES}，候选权重 0、0.1…1.0）
+            </span>
+            <div className="shapley-evidence-list reversal-edge-list">
+              {edges.map((edge) => {
+                const checked = selectedEdges.includes(edge.id);
+                return (
+                  <label key={edge.id} className="checkbox shapley-evidence-item">
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      disabled={!checked && limitReached}
+                      onChange={(event) => toggleEdge(edge.id, event.target.checked)}
+                    />
+                    {edgeLabel(edge)}
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+          <button
+            type="button"
+            className="primary sensitivity-run"
+            disabled={!canRun || running}
+            onClick={onRun}
+          >
+            {running ? '穷举评估中…' : '运行结论翻转方案'}
+          </button>
+          </fieldset>
+          <p className="hint">
+            服务端把所选连线权重限定在 0–1 的 11 个十分位候选值，沿用当前传播参数穷举全部{' '}
+            {selectedEdges.length > 0 ? `11^${selectedEdges.length} = ${11 ** selectedEdges.length}` : '11ⁿ'}
+            个组合，只接受收敛且达到期望侧者，按 L1 改变量最小、改动边数最少、权重向量字典序最小选全局最优；只在内存中计算，不会保存或改动当前图。
+          </p>
+          {status && <p className="sensitivity-status">{status}</p>}
+        </>
+      )}
+
+      {result && (
+        <div className="reversal-result">
+          <dl className="decomp-summary">
+            <dt>当前目标终值</dt>
+            <dd>
+              {result.baselineValue === null
+                ? result.baselineStatus === 'oscillating'
+                  ? '振荡，无终值'
+                  : '达到上限，无终值'
+                : result.baselineValue.toFixed(4)}
+            </dd>
+            <dt>目标终值（建议）</dt>
+            <dd className={result.best ? 'decomp-pos' : ''}>{result.best ? result.best.targetValue.toFixed(4) : '—'}</dd>
+            <dt>已评估组合</dt>
+            <dd>{result.evaluatedCount}</dd>
+            <dt>振荡 / 达到上限 / 无可行</dt>
+            <dd>
+              {result.oscillatingCount} / {result.limitCount} / {result.infeasibleCount}
+            </dd>
+          </dl>
+
+          {result.alreadySatisfied && result.best && (
+            <div className="reversal-zero" role="status">
+              <strong>零改动：当前图已经满足期望</strong>
+              <p className="hint">{result.message}</p>
+            </div>
+          )}
+
+          {!result.feasible && (
+            <div className="shapley-failure" role="alert">
+              <strong>无可行解</strong>
+              <p>{result.message}</p>
+              <p className="hint">振荡或达到上限的组合不提供可信终值，一律不接受；可改选其他可调连线后重试。</p>
+            </div>
+          )}
+
+          {result.feasible && !result.alreadySatisfied && result.best && (
+            <>
+              <ul className="reversal-checklist">
+                {result.best.suggestions.map((item) => {
+                  const edge = edges.find((candidate) => candidate.id === item.edgeId);
+                  return (
+                    <li key={item.edgeId} className={item.changed ? 'changed' : 'unchanged'}>
+                      <span className="reversal-check-label">
+                        {edge ? edgeLabel(edge) : item.edgeId}
+                      </span>
+                      <span className="reversal-check-values">
+                        <del>{percent(item.originalWeight)}</del>
+                        <strong>→ {percent(item.suggestedWeight)}</strong>
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+              <p className="hint">
+                共改动 {result.best.changedEdgeCount} 条连线，L1 改变量 {result.best.l1Change.toFixed(1)}（0.1 为一档），
+                可行组合 {result.feasibleCount} 个；应用后一次性更新画布并自动保存。
+              </p>
+              <button
+                type="button"
+                className="primary reversal-apply"
+                disabled={!suggestionsApplyable || graphEditingDisabled}
+                onClick={onApply}
+                title={suggestionsApplyable ? '把建议权重一次性写入画布并自动保存' : '画布已变化，请重新运行方案'}
+              >
+                ✓ 应用调权清单
+              </button>
+            </>
           )}
         </div>
       )}

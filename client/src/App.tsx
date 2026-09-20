@@ -18,6 +18,7 @@ import {
   SidePanel,
   graphToDocument,
   type BottleneckSelection,
+  type ReversalSelection,
   type SensitivitySelection,
   type ShapleySelection,
   type TraceSelection
@@ -34,6 +35,7 @@ import type {
   InfluencePath,
   PropagateOptions,
   PropagateResult,
+  ReversalResult,
   SensitivityResult,
   ShapleyResult,
   Stance,
@@ -45,6 +47,11 @@ const DEFAULT_OPTIONS: PropagateOptions = { threshold: 0.001, maxIterations: 200
 const DEFAULT_TRACE_SELECTION: TraceSelection = { startNodeId: '', targetNodeId: '', maxHops: 8 };
 const DEFAULT_SHAPLEY_SELECTION: ShapleySelection = { claimNodeId: '', evidenceNodeIds: [] };
 const DEFAULT_BOTTLENECK_SELECTION: BottleneckSelection = { targetNodeId: '' };
+const DEFAULT_REVERSAL_SELECTION: ReversalSelection = {
+  claimNodeId: '',
+  desiredSide: 'atLeastHalf',
+  edgeIds: []
+};
 
 type EdgeDecorMode = 'plain' | 'cycle' | 'trace-active' | 'bottleneck-active';
 
@@ -176,6 +183,10 @@ export default function App() {
   const [bottleneckRunning, setBottleneckRunning] = useState(false);
   const [bottleneckStatus, setBottleneckStatus] = useState('');
   const [bottleneckActiveKey, setBottleneckActiveKey] = useState<string | null>(null);
+  const [reversalSelection, setReversalSelection] = useState<ReversalSelection>(DEFAULT_REVERSAL_SELECTION);
+  const [reversalResult, setReversalResult] = useState<ReversalResult | null>(null);
+  const [reversalRunning, setReversalRunning] = useState(false);
+  const [reversalStatus, setReversalStatus] = useState('');
   const [layoutPreview, setLayoutPreview] = useState<LayoutPreview | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const saveTimerRef = useRef<number | null>(null);
@@ -250,6 +261,12 @@ export default function App() {
     setBottleneckResult(null);
     setBottleneckStatus('');
     setBottleneckActiveKey(null);
+  }, []);
+
+  // 图、传播参数或方案选择（目标 / 期望侧 / 可调连线）变化都会使翻转方案失效（穷举口径已变）。
+  const invalidateReversal = useCallback(() => {
+    setReversalResult(null);
+    setReversalStatus('');
   }, []);
 
   // 还原画布到进入预览前的坐标，并清掉预览标记（纯视图回退，不保存、不写 SQLite）。
@@ -339,6 +356,7 @@ export default function App() {
       invalidateTrace();
       invalidateShapley();
       invalidateBottleneck();
+      invalidateReversal();
       setNodes(
         nextNodes.map((node) => ({
           ...node,
@@ -359,7 +377,7 @@ export default function App() {
       );
       setEdges(nextEdges.map((edge) => decorateEdge({ ...edge, animated: false, style: undefined }, 'plain')));
     },
-    [edges, nodes, setEdges, setNodes, invalidateSensitivity, invalidateTrace, invalidateShapley, invalidateBottleneck]
+    [edges, nodes, setEdges, setNodes, invalidateSensitivity, invalidateTrace, invalidateShapley, invalidateBottleneck, invalidateReversal]
   );
 
   const onConnect = useCallback(
@@ -554,6 +572,8 @@ export default function App() {
     setShapleySelection(DEFAULT_SHAPLEY_SELECTION);
     invalidateBottleneck();
     setBottleneckSelection(DEFAULT_BOTTLENECK_SELECTION);
+    invalidateReversal();
+    setReversalSelection(DEFAULT_REVERSAL_SELECTION);
     if (nextOptions) setOptions(nextOptions);
     if (immediateSave) {
       setStatus('正在导入…');
@@ -668,8 +688,10 @@ export default function App() {
       invalidateTrace();
       // 分摊直接沿用当前传播参数重算每个联盟：参数一变，旧分摊立即失效。
       invalidateShapley();
+      // 翻转方案穷举同样沿用当前传播参数：参数一变，旧方案立即失效。
+      invalidateReversal();
     },
-    [invalidateSensitivity, invalidateTrace, invalidateShapley]
+    [invalidateSensitivity, invalidateTrace, invalidateShapley, invalidateReversal]
   );
 
   const runTrace = useCallback(async () => {
@@ -813,6 +835,80 @@ export default function App() {
       return { targetNodeId: '' };
     });
   }, [nodes]);
+
+  const runReversal = useCallback(async () => {
+    if (!reversalSelection.claimNodeId || reversalSelection.edgeIds.length === 0) return;
+    setReversalRunning(true);
+    setReversalStatus('正在服务端内存中穷举候选权重组合（不保存图）…');
+    try {
+      // 直接提交当前画布：方案搜索只在服务端内存中进行，不触发任何持久化。
+      const { reversal } = await api.conclusionFlip({
+        graph: graphToDocument(documentName, nodes, edges),
+        claimNodeId: reversalSelection.claimNodeId,
+        desiredSide: reversalSelection.desiredSide,
+        edgeIds: reversalSelection.edgeIds,
+        options
+      });
+      setReversalResult(reversal);
+      setReversalStatus(reversal.message);
+    } catch (error) {
+      setReversalResult(null);
+      setReversalStatus(`方案搜索失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setReversalRunning(false);
+    }
+  }, [
+    documentName,
+    edges,
+    nodes,
+    options,
+    reversalSelection.claimNodeId,
+    reversalSelection.desiredSide,
+    reversalSelection.edgeIds
+  ]);
+
+  // 目标 / 期望侧 / 可调连线变化即清空已展示的方案（图 / 参数变化由 clearAnalysis 与 handleOptionsChange 负责）。
+  const handleReversalSelectionChange = useCallback(
+    (patch: Partial<ReversalSelection>) => {
+      setReversalSelection((current) => ({ ...current, ...patch }));
+      invalidateReversal();
+    },
+    [invalidateReversal]
+  );
+
+  // 目标观点被删除 / 改类型，或可调连线被删除后，剪枝失效选择（结果本身已在选择变化时清空）。
+  useEffect(() => {
+    setReversalSelection((current) => {
+      const claimExists =
+        !current.claimNodeId ||
+        nodes.some((node) => node.id === current.claimNodeId && node.data.kind === 'claim');
+      const liveEdgeIds = current.edgeIds.filter((id) => edges.some((edge) => edge.id === id));
+      if (claimExists && liveEdgeIds.length === current.edgeIds.length) return current;
+      return {
+        claimNodeId: claimExists ? current.claimNodeId : '',
+        desiredSide: current.desiredSide,
+        edgeIds: liveEdgeIds.slice(0, 4)
+      };
+    });
+  }, [nodes, edges]);
+
+  // 应用调权清单：一次性把建议权重写入画布，并复用现有（防抖）自动保存；随后按“图已编辑”清空所有分析结果。
+  const applyReversalPlan = useCallback(() => {
+    const plan = reversalResult;
+    if (!plan?.best || layoutPreview) return;
+    const suggestionById = new Map(plan.best.suggestions.map((item) => [item.edgeId, item.suggestedWeight]));
+    const nextEdges = edges.map((edge) => {
+      const suggested = suggestionById.get(edge.id);
+      if (suggested === undefined) return edge;
+      return decorateEdge({ ...edge, data: { ...edge.data, weight: suggested } }, 'plain');
+    });
+    setEdges(nextEdges);
+    // 权重变化属于图编辑：清空传播 / 回放及所有分析卡片结果（含本方案的调权清单）。
+    clearAnalysis(nodes, nextEdges);
+    scheduleSaveRef.current(nodes, nextEdges);
+    // clearAnalysis 会清空状态文案，这里在其后重新写入应用结果提示（函数式更新避免闭包覆盖）。
+    setReversalStatus(`已应用调权清单并保存：目标终值 ${plan.best.targetValue.toFixed(4)}。可运行稳定性分析复核。`);
+  }, [clearAnalysis, edges, nodes, reversalResult, setEdges]);
 
   // 当前要在画布上高亮的瓶颈（分析结果中 activeKey 对应的一项）。
   const activeBottleneck: BottleneckItem | null = useMemo(() => {
@@ -1004,6 +1100,10 @@ export default function App() {
                   targetNodeId: node.id,
                   startNodeId: current.startNodeId === node.id ? '' : current.startNodeId
                 }));
+                // 点击观点节点同时作为结论翻转方案的目标候选（不覆盖已有目标）。
+                setReversalSelection((current) =>
+                  current.claimNodeId ? current : { ...current, claimNodeId: node.id }
+                );
               }
             }}
             onEdgeClick={(_event, edge) => {
@@ -1141,6 +1241,15 @@ export default function App() {
             onToggle: (key) => setBottleneckActiveKey((current) => (current === key ? null : key)),
             onRun: runBottleneck,
             onClose: invalidateBottleneck
+          }}
+          reversal={{
+            selection: reversalSelection,
+            onSelectionChange: handleReversalSelectionChange,
+            result: reversalResult,
+            running: reversalRunning,
+            status: reversalStatus,
+            onApply: applyReversalPlan,
+            onClose: invalidateReversal
           }}
         />
       </main>

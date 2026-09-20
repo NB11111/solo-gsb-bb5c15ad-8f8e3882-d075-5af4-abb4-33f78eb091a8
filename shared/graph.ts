@@ -293,3 +293,78 @@ export interface BottleneckRequest {
   /** 目标观点节点 id（kind 必须为 claim） */
   targetNodeId: string;
 }
+
+/** 结论翻转方案的期望侧：最终可信度 ≥ 0.5 或 < 0.5 */
+export type ReversalSide = 'atLeastHalf' | 'belowHalf';
+
+/** 结论翻转方案中一条可调连线的原值 / 建议值 */
+export interface ReversalEdgeSuggestion {
+  /** 连线 id */
+  edgeId: string;
+  sourceId: string;
+  targetId: string;
+  stance: Stance;
+  /** 当前画布上的边权 */
+  originalWeight: number;
+  /** 最优组合建议的边权（候选值 0、0.1…1.0） */
+  suggestedWeight: number;
+  /** 该边是否确实需要改动 */
+  changed: boolean;
+}
+
+export interface ReversalResult {
+  /** 目标观点节点 id */
+  claimNodeId: string;
+  /** 期望侧：最终可信度 ≥ 0.5 / < 0.5 */
+  desiredSide: ReversalSide;
+  /** 参与穷举的可调连线 id（按 id 升序，权重向量以此为坐标顺序） */
+  edgeIds: string[];
+  /** 候选权重数（恒为 11：0、0.1…1.0） */
+  candidateSteps: number;
+  /** 实际评估的组合数（当前图已满足期望、零改动直接返回时为 1；否则为 11^n） */
+  evaluatedCount: number;
+  /** 当前权重下目标观点的传播状态：收敛 / 振荡 / 达到上限 */
+  baselineStatus: SensitivityPointStatus;
+  /** 当前权重下目标观点终值（仅收敛时有效，振荡为 null） */
+  baselineValue: number | null;
+  /** 当前图是否已经满足期望（满足则直接给出零改动方案） */
+  alreadySatisfied: boolean;
+  /** 满足期望的收敛组合数 */
+  feasibleCount: number;
+  /** 是否存在可行组合（false 时 best 为 null） */
+  feasible: boolean;
+  /** 全局最优组合（无可行组合或零改动时除外）；零改动时也返回（建议值 = 原值） */
+  best: {
+    /** 每条可调连线的原值 / 建议值，顺序与 edgeIds 一致（按 id 升序） */
+    suggestions: ReversalEdgeSuggestion[];
+    /** 应用建议权重后目标观点的收敛终值 */
+    targetValue: number;
+    /** 相对当前权重的 L1 改变量 Σ|建议值 − 原值| */
+    l1Change: number;
+    /** 实际改动边数（建议值 ≠ 原值的连线数） */
+    changedEdgeCount: number;
+    /** 收敛所用迭代轮数 */
+    iterations: number;
+  } | null;
+  /** 评估过程中出现持续振荡的组合数 */
+  oscillatingCount: number;
+  /** 评估过程中达到迭代上限仍未收敛的组合数 */
+  limitCount: number;
+  /** 收敛但终值落在期望侧之外（无可行解）的组合数 */
+  infeasibleCount: number;
+  /** 本次计算实际使用的传播参数 */
+  options: Required<PropagateOptions>;
+  message: string;
+}
+
+export interface ReversalRequest {
+  /** 画布当前图：仅在内存中用于本次方案搜索，不会被保存或持久化 */
+  graph: GraphDocument;
+  /** 目标观点节点 id（kind 必须为 claim） */
+  claimNodeId: string;
+  /** 期望侧：最终可信度 ≥ 0.5（'atLeastHalf'）或 < 0.5（'belowHalf'） */
+  desiredSide: ReversalSide;
+  /** 1–4 条可调连线 id（必须都存在于 graph.edges） */
+  edgeIds: string[];
+  options?: PropagateOptions;
+}
